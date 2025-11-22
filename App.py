@@ -23,7 +23,7 @@ except Exception:
 try:
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseUpload
+    from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 except Exception:
     service_account = None
     build = None
@@ -366,7 +366,7 @@ def list_gdrive_images(folder_id: Optional[str] = None):
         results = st.session_state.service.files().list(
             q=f"'{folder_id}' in parents and trashed=false and (mimeType='image/png' or mimeType='image/jpeg' or mimeType='image/webp' or mimeType='image/jpg')",
             spaces='drive',
-            fields='files(id, name, webContentLink, webViewLink, createdTime, size, mimeType, thumbnailLink, webContentLink)',
+            fields='files(id, name, webContentLink, webViewLink, createdTime, size, mimeType, thumbnailLink)',
             pageSize=100,
             orderBy='createdTime desc'
         ).execute()
@@ -377,12 +377,31 @@ def list_gdrive_images(folder_id: Optional[str] = None):
             file_id = file['id']
             file['public_image_url'] = f"https://drive.google.com/uc?export=view&id={file_id}"
             file['thumbnail_url'] = f"https://drive.google.com/thumbnail?id={file_id}&sz=w400"
-            file['direct_link'] = f"https://drive.google.com/uc?export=download&id={file_id}"
+            file['direct_link'] = f"https://lh3.googleusercontent.com/d/{file_id}"
         
         return files
     except Exception as e:
         st.error(f"Error listing images: {str(e)}")
         return []
+
+def get_gdrive_image_bytes(file_id: str) -> Optional[bytes]:
+    """Download image content from Google Drive using the API."""
+    if not st.session_state.service:
+        return None
+    
+    try:
+        # Use the files().get_media() method to download the file content
+        request = st.session_state.service.files().get_media(fileId=file_id)
+        file_content = io.BytesIO()
+        downloader = MediaIoBaseDownload(file_content, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+        
+        return file_content.getvalue()
+    except Exception as e:
+        st.error(f"Error downloading file {file_id} from Google Drive: {str(e)}")
+        return None
 
 def delete_gdrive_file(file_id: str):
     """Delete a file from Google Drive."""
@@ -1280,6 +1299,7 @@ def display_library_page():
                     st.markdown(f"<div class='image-card'>", unsafe_allow_html=True)
                     
                     image_displayed = False
+                    # Robust image display: Try direct download first, then fall back to API bytes
                     urls_to_try = [
                         original_url,  # Original generation URL (highest quality)
                         public_image_url,  # Google Drive public URL
@@ -1287,6 +1307,7 @@ def display_library_page():
                         direct_link  # Google Drive direct link
                     ]
                     
+                    # 1. Try displaying via URL (might work for public links)
                     for url in urls_to_try:
                         if url and not image_displayed:
                             try:
@@ -1295,6 +1316,16 @@ def display_library_page():
                                 break
                             except Exception:
                                 continue
+                    
+                    # 2. If URL failed, download bytes via API and display
+                    if not image_displayed and file_id:
+                        image_bytes = get_gdrive_image_bytes(file_id)
+                        if image_bytes:
+                            try:
+                                st.image(image_bytes, use_container_width=True, caption=file_name)
+                                image_displayed = True
+                            except Exception as e:
+                                st.warning(f"Could not display image {file_name} from bytes: {e}")
                     
                     if not image_displayed:
                         st.markdown(f"<div class='image-container'><div class='image-placeholder'>🖼️<br>Preview unavailable<br><a href='{web_link}' target='_blank'>Open in Drive</a></div></div>", unsafe_allow_html=True)
@@ -1390,28 +1421,32 @@ def display_library_page():
                 st.markdown(f"<div class='image-card'>", unsafe_allow_html=True)
                 
                 col1, col2 = st.columns([1, 3])
-                
-                with col1:
-                    # Thumbnail - try original first, then Drive thumbnails
+                                   # Thumbnail - try original first, then Drive thumbnails
                     image_displayed = False
                     urls_to_try = [original_url, thumbnail_url, public_image_url, direct_link]
                     
+                    # 1. Try displaying via URL (might work for public links)
                     for url in urls_to_try:
                         if url and not image_displayed:
                             try:
-                                st.image(url, width=150)
+                                st.image(url, use_container_width=True)
                                 image_displayed = True
                                 break
                             except Exception:
                                 continue
                     
-                    if not image_displayed:
-                        st.markdown("🖼️ No preview")
-                
-                with col2:
-                    st.markdown(f"### {file_name}")
+                    # 2. If URL failed, download bytes via API and display
+                    if not image_displayed and file_id:
+                        image_bytes = get_gdrive_image_bytes(file_id)
+                        if image_bytes:
+                            try:
+                                st.image(image_bytes, use_container_width=True)
+                                image_displayed = True
+                            except Exception as e:
+                                st.warning(f"Could not display image {file_name} from bytes: {e}")
                     
-                    link_badges = ""
+                    if not image_displayed:
+                        st.markdown(f"<div class='image-container' style='height: 100px;'><div class='image-placeholder'>🖼️<br>Preview unavailable</div></div>", unsafe_allow_html=True)                    link_badges = ""
                     if original_url:
                         link_badges += f"<a href='{original_url}' target='_blank'><span class='metadata-badge' style='background:#4CAF50;color:white;cursor:pointer;'>🔗 Original</span></a> "
                     if public_image_url:

@@ -301,7 +301,7 @@ def init_session_state():
             'total_images': 0,
             'uploaded_images': 0,
             'sheets_entries': 0,
-            'csv_entries': 0
+            'csv_entries': 0  # Ensure csv_entries key exists
         },
         'current_page': "Generate",
         'selected_image_for_edit': None,
@@ -348,6 +348,13 @@ def init_session_state():
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+    
+    if 'stats' in st.session_state:
+        required_stats_keys = ['total_tasks', 'successful_tasks', 'failed_tasks', 
+                               'total_images', 'uploaded_images', 'sheets_entries', 'csv_entries']
+        for stat_key in required_stats_keys:
+            if stat_key not in st.session_state.stats:
+                st.session_state.stats[stat_key] = 0
 
 init_session_state()
 
@@ -976,7 +983,8 @@ with st.sidebar:
             else:
                 st.error(message)
     
-    st.caption(f"📊 CSV Entries: {st.session_state.stats['csv_entries']}")
+    csv_entries = st.session_state.stats.get('csv_entries', 0)
+    st.caption(f"📊 CSV Entries: {csv_entries}")
     
     st.divider()
     

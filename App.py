@@ -940,19 +940,16 @@ def display_generate_page():
             prompt = st.text_area(
                 "Prompt", 
                 "A photorealistic image of a majestic lion wearing a crown, digital art, highly detailed",
-                height=100
-            )
-            negative_prompt = st.text_area(
-                "Negative Prompt (Optional)", 
-                "blurry, low quality, bad anatomy",
-                height=60
+                height=100,
+                help="Describe the image you want to generate"
             )
             
-            col1, col2, col3 = st.columns(3)
+            col1, col2 = st.columns([2, 1])
             with col1:
                 model = st.selectbox(
                     "Model", 
                     [
+                        "nano-banana-pro",
                         "flux-pro",
                         "flux-dev",
                         "flux-schnell",
@@ -963,30 +960,163 @@ def display_generate_page():
                         "midjourney-v6"
                     ], 
                     index=0,
-                    key="txt2img_model"
+                    key="txt2img_model",
+                    help="Select the AI model for generation"
                 )
-            with col2:
-                width = st.slider("Width", 512, 2048, 1024, step=64, key="txt2img_width")
-            with col3:
-                height = st.slider("Height", 512, 2048, 1024, step=64, key="txt2img_height")
             
-            col4, col5 = st.columns(2)
-            with col4:
-                num_images = st.slider("Number of Images", 1, 4, 1, key="txt2img_num")
-            with col5:
-                guidance_scale = st.slider("Guidance Scale", 1.0, 20.0, 7.5, step=0.5, key="txt2img_guidance")
+            with col2:
+                st.markdown("### Model Info")
+                if model == "nano-banana-pro":
+                    st.info("🍌 Supports multiple reference images (up to 8)")
+                else:
+                    st.info("Standard text-to-image model")
+            
+            image_input_urls = []
+            if model == "nano-banana-pro":
+                st.markdown("---")
+                st.subheader("🖼️ Reference Images (Optional)")
+                st.caption("Add up to 8 images to use as reference for generation")
+                
+                # Option to select from library
+                if st.session_state.authenticated and st.session_state.library_images:
+                    use_library_images = st.checkbox("📚 Select images from library", value=True, key="use_library_for_nano")
+                    
+                    if use_library_images:
+                        st.markdown("**Select up to 8 images from your library:**")
+                        
+                        # Create a grid for image selection
+                        valid_images = [img for img in st.session_state.library_images if img and 'id' in img]
+                        
+                        if valid_images:
+                            selected_image_ids = []
+                            
+                            # Display images in a grid with checkboxes
+                            cols_per_row = 4
+                            for i, img in enumerate(valid_images[:20]):  # Show first 20 images
+                                if i % cols_per_row == 0:
+                                    cols = st.columns(cols_per_row)
+                                
+                                with cols[i % cols_per_row]:
+                                    # Show thumbnail
+                                    display_gdrive_image(img, width=100)
+                                    
+                                    # Checkbox for selection
+                                    is_selected = st.checkbox(
+                                        img.get('name', f'Image {i}')[:20],
+                                        key=f"select_nano_{img.get('id')}",
+                                        help=img.get('name', 'Image')
+                                    )
+                                    
+                                    if is_selected:
+                                        selected_image_ids.append(img.get('id'))
+                                        if img.get('public_image_url'):
+                                            image_input_urls.append(img.get('public_image_url'))
+                            
+                            if len(selected_image_ids) > 8:
+                                st.warning("⚠️ Maximum 8 images allowed. Only the first 8 will be used.")
+                                image_input_urls = image_input_urls[:8]
+                            
+                            if selected_image_ids:
+                                st.success(f"✅ {len(selected_image_ids)} image(s) selected")
+                        else:
+                            st.info("No images in library. Upload images first!")
+                    else:
+                        # Manual URL input
+                        st.markdown("**Enter image URLs (one per line):**")
+                        image_urls_text = st.text_area(
+                            "Image URLs",
+                            placeholder="https://example.com/image1.jpg\nhttps://example.com/image2.jpg",
+                            height=100,
+                            key="nano_image_urls"
+                        )
+                        if image_urls_text:
+                            image_input_urls = [url.strip() for url in image_urls_text.split('\n') if url.strip()]
+                            if len(image_input_urls) > 8:
+                                st.warning("⚠️ Maximum 8 images allowed. Only the first 8 will be used.")
+                                image_input_urls = image_input_urls[:8]
+                else:
+                    # Manual URL input for non-authenticated users
+                    st.markdown("**Enter image URLs (one per line):**")
+                    image_urls_text = st.text_area(
+                        "Image URLs",
+                        placeholder="https://example.com/image1.jpg\nhttps://example.com/image2.jpg",
+                        height=100,
+                        key="nano_image_urls_manual"
+                    )
+                    if image_urls_text:
+                        image_input_urls = [url.strip() for url in image_urls_text.split('\n') if url.strip()]
+                        if len(image_input_urls) > 8:
+                            st.warning("⚠️ Maximum 8 images allowed. Only the first 8 will be used.")
+                            image_input_urls = image_input_urls[:8]
+                
+                st.markdown("---")
+                
+                # Nano Banana Pro specific parameters
+                col_nano1, col_nano2, col_nano3 = st.columns(3)
+                with col_nano1:
+                    aspect_ratio = st.selectbox(
+                        "Aspect Ratio",
+                        ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"],
+                        index=0,
+                        key="nano_aspect"
+                    )
+                with col_nano2:
+                    resolution = st.selectbox(
+                        "Resolution",
+                        ["1K", "2K", "4K"],
+                        index=0,
+                        key="nano_resolution"
+                    )
+                with col_nano3:
+                    output_format = st.selectbox(
+                        "Output Format",
+                        ["png", "jpg"],
+                        index=0,
+                        key="nano_format"
+                    )
+            else:
+                # Standard model parameters
+                negative_prompt = st.text_area(
+                    "Negative Prompt (Optional)", 
+                    "blurry, low quality, bad anatomy",
+                    height=60
+                )
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    width = st.slider("Width", 512, 2048, 1024, step=64, key="txt2img_width")
+                with col2:
+                    height = st.slider("Height", 512, 2048, 1024, step=64, key="txt2img_height")
+                with col3:
+                    num_images = st.slider("Number of Images", 1, 4, 1, key="txt2img_num")
+                
+                col4, col5 = st.columns(2)
+                with col4:
+                    guidance_scale = st.slider("Guidance Scale", 1.0, 20.0, 7.5, step=0.5, key="txt2img_guidance")
+                with col5:
+                    num_steps = st.slider("Inference Steps", 20, 100, 50, key="txt2img_steps")
             
             submitted = st.form_submit_button("🚀 Generate Image", type="primary", use_container_width=True)
             
             if submitted:
-                input_params = {
-                    "prompt": prompt,
-                    "negative_prompt": negative_prompt,
-                    "width": width,
-                    "height": height,
-                    "num_images": num_images,
-                    "guidance_scale": guidance_scale
-                }
+                if model == "nano-banana-pro":
+                    input_params = {
+                        "prompt": prompt,
+                        "image_input": image_input_urls,
+                        "aspect_ratio": aspect_ratio,
+                        "resolution": resolution,
+                        "output_format": output_format
+                    }
+                else:
+                    input_params = {
+                        "prompt": prompt,
+                        "negative_prompt": negative_prompt,
+                        "width": width,
+                        "height": height,
+                        "num_images": num_images,
+                        "guidance_scale": guidance_scale,
+                        "num_inference_steps": num_steps
+                    }
                 
                 with st.spinner("Creating task..."):
                     result = create_task(st.session_state.api_key, model, input_params)
@@ -1001,7 +1131,8 @@ def display_generate_page():
                         "prompt": prompt,
                         "status": "waiting",
                         "created_at": datetime.now().isoformat(),
-                        "results": []
+                        "results": [],
+                        "image_inputs": image_input_urls if model == "nano-banana-pro" else []
                     })
                     st.session_state.current_task = task_id
                     st.rerun()
@@ -1623,7 +1754,7 @@ with st.sidebar:
             csv_content = export_to_csv()
             if csv_content:
                 st.download_button(
-                    "💾 Export",
+                    "Export",
                     data=csv_content,
                     file_name=f"image_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                     mime="text/csv",
@@ -2035,20 +2166,20 @@ with tab6:
     - Real-time progress tracking
     - Batch generation (up to 10 prompts at once)
     
-    **☁️ Cloud Storage:**
+    #### ☁️ Cloud Storage:
     - Google Drive integration with automatic uploads
     - Public image URLs for easy sharing
     - Organized folder structure
     - Image library management with search and filters
     
-    **📊 Data Management:**
+    #### 📊 Data Management:
     - Google Sheets automatic logging
     - CSV export/import capabilities
     - Comprehensive statistics dashboard
     - Tagging system for organization
     - Filtering and search across all data
     
-    **🔍 Advanced Features:**
+    #### 🔍 Advanced Features:
     - Image comparison mode (up to 4 images)
     - Batch operations (select, delete, download)
     - Grid and list view modes
@@ -2056,7 +2187,7 @@ with tab6:
     - Download queue management
     - Pagination for large datasets
     
-    **⚡ Quick Actions:**
+    #### ⚡ Quick Actions:
     - One-click refresh
     - Bulk delete operations
     - Export filtered data

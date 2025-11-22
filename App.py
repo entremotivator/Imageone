@@ -1448,7 +1448,8 @@ def display_library_page():
                                 st.warning(f"Could not display image {file_name} from bytes: {e}")
                     
                     if not image_displayed:
-                        st.markdown(f"<div class='image-container' style='height: 100px;'><div class='image-placeholder'>🖼️<br>Preview unavailable</div></div>", unsafe_allow_html=True)                    link_badges = ""
+                        st.markdown(f"<div class='image-container' style='height: 100px;'><div class='image-placeholder'>🖼️<br>Preview unavailable</div></div>", unsafe_allow_html=True)
+                    link_badges = ""
                     if original_url:
                         link_badges += f"<a href='{original_url}' target='_blank'><span class='metadata-badge' style='background:#4CAF50;color:white;cursor:pointer;'>🔗 Original</span></a> "
                     if public_image_url:

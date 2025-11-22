@@ -1421,7 +1421,9 @@ def display_library_page():
                 st.markdown(f"<div class='image-card'>", unsafe_allow_html=True)
                 
                 col1, col2 = st.columns([1, 3])
-                                   # Thumbnail - try original first, then Drive thumbnails
+                
+                with col1:
+                    # Thumbnail - try original first, then Drive thumbnails
                     image_displayed = False
                     urls_to_try = [original_url, thumbnail_url, public_image_url, direct_link]
                     

@@ -1131,6 +1131,7 @@ def display_generate_page():
                         "prompt": prompt,
                         "status": "waiting",
                         "created_at": datetime.now().isoformat(),
+                        "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                         "results": [],
                         "image_inputs": image_input_urls if model == "nano-banana-pro" else []
                     })
@@ -1245,6 +1246,7 @@ def display_generate_page():
                         "prompt": prompt,
                         "status": "waiting",
                         "created_at": datetime.now().isoformat(),
+                        "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                         "results": []
                     })
                     st.session_state.current_task = task_id
@@ -1349,6 +1351,7 @@ def display_generate_page():
                         "prompt": prompt,
                         "status": "waiting",
                         "created_at": datetime.now().isoformat(),
+                        "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                         "results": []
                     })
                     st.session_state.current_task = task_id
@@ -1871,7 +1874,17 @@ with tab1:
                     st.write(f"**Status:** {task['status']}")
                 
                 with col_info2:
-                    st.write(f"**Timestamp:** {task['timestamp']}")
+                    # Handle both 'timestamp' and 'created_at' keys for backwards compatibility
+                    timestamp_value = task.get('timestamp') or task.get('created_at', 'N/A')
+                    if timestamp_value != 'N/A' and 'T' in str(timestamp_value):
+                        # Format ISO timestamp nicely
+                        try:
+                            from datetime import datetime
+                            dt = datetime.fromisoformat(timestamp_value.replace('Z', '+00:00'))
+                            timestamp_value = dt.strftime('%Y-%m-%d %H:%M:%S')
+                        except:
+                            pass
+                    st.write(f"**Timestamp:** {timestamp_value}")
                     if task.get('tags'):
                         st.write(f"**Tags:** {task['tags']}")
                 
@@ -2125,7 +2138,7 @@ with tab5:
                         'id': task_id,
                         'model': batch_model,
                         'prompt': prompt,
-                        'timestamp': datetime.now().isoformat(),
+                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                         'status': 'pending',
                         'results': []
                     })
@@ -2173,7 +2186,7 @@ with tab6:
     - Image library management with search and filters
     
     #### 📊 Data Management:
-    - Google Sheets automatic logging
+    - Google Sheets integration
     - CSV export/import capabilities
     - Comprehensive statistics dashboard
     - Tagging system for organization

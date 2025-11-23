@@ -289,11 +289,14 @@ def init_session_state():
         'library_images': [],
         'gdrive_folder_id': None,
         'spreadsheet_id': None,
-        'auto_upload': True,
+        'auto_upload': True,  # Changed default to True - always upload to Drive
         'auto_log_sheets': True,
         'polling_active': False,
         'service_account_info': None,
         'upload_queue': [],
+        'task_queue': [],  # Added task queue for better management
+        'active_tasks': [],  # Track currently processing tasks
+        'image_cache': {},  # Cache for loaded images
         'stats': {
             'total_tasks': 0,
             'successful_tasks': 0,
@@ -301,7 +304,7 @@ def init_session_state():
             'total_images': 0,
             'uploaded_images': 0,
             'sheets_entries': 0,
-            'csv_entries': 0  # Ensure csv_entries key exists
+            'csv_entries': 0
         },
         'current_page': "Generate",
         'selected_image_for_edit': None,
@@ -518,7 +521,11 @@ def list_gdrive_images(folder_id=None):
         return []
 
 def get_gdrive_image_bytes(file_id):
-    """Download image bytes from Google Drive."""
+    """Fetch image bytes from Google Drive with caching."""
+    # Check cache first
+    if file_id in st.session_state.image_cache:
+        return st.session_state.image_cache[file_id]
+    
     if not st.session_state.service:
         return None
     
@@ -526,12 +533,18 @@ def get_gdrive_image_bytes(file_id):
         request = st.session_state.service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
+        
         done = False
         while not done:
-            _, done = downloader.next_chunk()
+            status, done = downloader.next_chunk()
         
         fh.seek(0)
-        return fh.read()
+        image_bytes = fh.read()
+        
+        # Cache the image
+        st.session_state.image_cache[file_id] = image_bytes
+        
+        return image_bytes
     except Exception as e:
         st.error(f"Error downloading image: {str(e)}")
         return None
@@ -854,7 +867,7 @@ def save_and_upload_results(task_id, model, prompt, result_urls, tags=""):
                 file_name = f"{model.replace('/', '_')}_{task_id}_{j+1}.png"
                 drive_link = ""
                 
-                if st.session_state.authenticated and st.session_state.auto_upload:
+                if st.session_state.authenticated:
                     upload_info = upload_to_gdrive(result_url, file_name, task_id)
                     if upload_info:
                         st.session_state.library_images.insert(0, upload_info)
@@ -899,7 +912,6 @@ def remove_from_comparison(image_id):
         img for img in st.session_state.comparison_images if img.get('id') != image_id
     ]
 
-# Helper function to display a Google Drive image from file_info dictionary
 def display_gdrive_image(file_info, caption="", width=150):
     """Displays an image from Google Drive file info."""
     if not st.session_state.service or not file_info or not file_info.get('id'):
@@ -1456,7 +1468,6 @@ def display_generate_page():
                                 'webContentLink': file.get('webContentLink'),
                                 'public_image_url': public_image_url,
                                 'thumbnail_url': thumbnail_url,
-                                'thumbnailLink': thumbnail_url,
                                 'mime_type': file.get('mimeType'),
                                 'mimeType': file.get('mimeType'),
                                 'uploaded_at': datetime.now().isoformat(),
@@ -1591,7 +1602,7 @@ def display_generate_page():
 def display_library_page():
     st.title("📚 Google Drive Library")
     
-    col1, col2 = st.columns([1, 4])
+    col1, col2, col3 = st.columns([1, 1, 3])
     with col1:
         if st.button("⬅️ Back to Generate", use_container_width=True):
             st.session_state.current_page = "Generate"
@@ -1601,8 +1612,12 @@ def display_library_page():
         if st.button("🔄 Refresh Library", use_container_width=True):
             with st.spinner("Refreshing..."):
                 st.session_state.library_images = list_gdrive_images()
+                st.session_state.image_cache.clear()  # Clear cache on refresh
                 st.success("Library refreshed!")
                 st.rerun()
+    
+    with col3:
+        view_mode = st.radio("View", ["Grid", "List"], horizontal=True, key="lib_view_mode")
     
     st.markdown("---")
     
@@ -1610,9 +1625,11 @@ def display_library_page():
         st.error("⚠️ Please connect your Google Drive Service Account in the sidebar to view the library.")
         return
     
-    with st.spinner("Loading images from Google Drive..."):
-        if not st.session_state.library_images:
+    if not st.session_state.library_images:
+        with st.spinner("Loading images from Google Drive..."):
             st.session_state.library_images = list_gdrive_images()
+            if st.session_state.library_images:
+                st.success(f"✅ Loaded {len(st.session_state.library_images)} images!")
     
     if not st.session_state.library_images:
         st.info("📭 Your Google Drive folder is empty. Start generating or uploading images!")
@@ -1624,60 +1641,465 @@ def display_library_page():
     valid_images = [img for img in st.session_state.library_images if img and 'name' in img and 'id' in img]
     
     st.markdown(f"**{len(valid_images)} images** in your library")
+    
+    # Search and filter
+    search_query = st.text_input("🔍 Search images", placeholder="Enter filename or tag...")
+    
+    if search_query:
+        valid_images = [img for img in valid_images if search_query.lower() in img.get('name', '').lower()]
+        st.info(f"Found {len(valid_images)} matching images")
+    
     st.markdown("---")
     
-    cols_per_row = 3
-    
-    for i, file_info in enumerate(valid_images):
-        if i % cols_per_row == 0:
-            cols = st.columns(cols_per_row)
+    if view_mode == "Grid":
+        cols_per_row = 4  # Increased to 4 columns for better space utilization
         
-        with cols[i % cols_per_row]:
+        for i, file_info in enumerate(valid_images):
+            if i % cols_per_row == 0:
+                cols = st.columns(cols_per_row)
+            
+            with cols[i % cols_per_row]:
+                file_name = file_info.get('name', 'Unknown File')
+                web_link = file_info.get('webViewLink', '#')
+                file_id = file_info.get('id', f"no_id_{i}")
+                
+                with st.container():
+                    st.markdown("<div style='border: 1px solid #ddd; border-radius: 8px; padding: 10px; margin-bottom: 15px;'>", unsafe_allow_html=True)
+                    
+                    display_gdrive_image(file_info, caption=file_name[:30])
+                    
+                    edit_col1, edit_col2 = st.columns(2)
+                    with edit_col1:
+                        if st.button("✏️ Qwen", key=f"edit_qwen_{file_id}", use_container_width=True):
+                            st.session_state.selected_image_for_edit = file_info
+                            st.session_state.edit_mode = 'qwen'
+                            st.session_state.current_page = "Generate"
+                            st.rerun()
+                    
+                    with edit_col2:
+                        if st.button("🎨 Seedream", key=f"edit_seedream_{file_id}", use_container_width=True):
+                            st.session_state.selected_image_for_edit = file_info
+                            st.session_state.edit_mode = 'seedream'
+                            st.session_state.current_page = "Generate"
+                            st.rerun()
+                    
+                    btn_col1, btn_col2, btn_col3 = st.columns(3)
+                    with btn_col1:
+                        st.markdown(f"<a href='{web_link}' target='_blank'><button style='width:100%;padding:6px;background:#4285F4;color:white;border:none;border-radius:4px;cursor:pointer;font-size:12px;'>🔗</button></a>", unsafe_allow_html=True)
+                    
+                    with btn_col2:
+                        image_url = file_info.get('public_image_url', '')
+                        if image_url:
+                            st.markdown(f"<a href='{image_url}' target='_blank'><button style='width:100%;padding:6px;background:#34A853;color:white;border:none;border-radius:4px;cursor:pointer;font-size:12px;'>🖼️</button></a>", unsafe_allow_html=True)
+                    
+                    with btn_col3:
+                        if st.button("🗑️", key=f"delete_{file_id}", use_container_width=True, help="Delete"):
+                            with st.spinner(f"Deleting..."):
+                                if delete_gdrive_file(file_id):
+                                    st.success(f"✅ Deleted")
+                                    st.session_state.library_images = [img for img in st.session_state.library_images if img.get('id') != file_id]
+                                    # Remove from cache
+                                    if file_id in st.session_state.image_cache:
+                                        del st.session_state.image_cache[file_id]
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Failed")
+                    
+                    st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        # List view
+        for file_info in valid_images:
             file_name = file_info.get('name', 'Unknown File')
             web_link = file_info.get('webViewLink', '#')
-            file_id = file_info.get('id', f"no_id_{i}")
+            file_id = file_info.get('id', 'no_id')
             
-            with st.container():
-                st.markdown("<div style='border: 1px solid #ddd; border-radius: 8px; padding: 10px; margin-bottom: 15px;'>", unsafe_allow_html=True)
+            with st.expander(f"🖼️ {file_name}"):
+                col_img, col_actions = st.columns([1, 2])
                 
-                display_gdrive_image(file_info, caption=file_name)
+                with col_img:
+                    display_gdrive_image(file_info, width=200)
                 
-                edit_col1, edit_col2 = st.columns(2)
-                with edit_col1:
-                    if st.button("✏️ Edit (Qwen)", key=f"edit_qwen_{file_id}", use_container_width=True):
-                        st.session_state.selected_image_for_edit = file_info
-                        st.session_state.edit_mode = 'qwen'
-                        st.session_state.current_page = "Generate"
-                        st.rerun()
-                
-                with edit_col2:
-                    if st.button("🎨 Edit (Seedream)", key=f"edit_seedream_{file_id}", use_container_width=True):
-                        st.session_state.selected_image_for_edit = file_info
-                        st.session_state.edit_mode = 'seedream'
-                        st.session_state.current_page = "Generate"
-                        st.rerun()
-                
-                btn_col1, btn_col2, btn_col3 = st.columns(3)
-                with btn_col1:
-                    st.markdown(f"<a href='{web_link}' target='_blank'><button style='width:100%;padding:8px;background:#4285F4;color:white;border:none;border-radius:6px;cursor:pointer;'>🔗 View</button></a>", unsafe_allow_html=True)
-                
-                with btn_col2:
-                    image_url = file_info.get('public_image_url', '')
-                    if image_url:
-                        st.markdown(f"<a href='{image_url}' target='_blank'><button style='width:100%;padding:8px;background:#34A853;color:white;border:none;border-radius:6px;cursor:pointer;'>🖼️ Open</button></a>", unsafe_allow_html=True)
-                
-                with btn_col3:
-                    if st.button("🗑️", key=f"delete_{file_id}", use_container_width=True, help="Delete"):
-                        with st.spinner(f"Deleting..."):
+                with col_actions:
+                    st.write(f"**Name:** {file_name}")
+                    st.write(f"**File ID:** `{file_id}`")
+                    
+                    action_col1, action_col2 = st.columns(2)
+                    with action_col1:
+                        if st.button("✏️ Edit (Qwen)", key=f"list_edit_qwen_{file_id}", use_container_width=True):
+                            st.session_state.selected_image_for_edit = file_info
+                            st.session_state.edit_mode = 'qwen'
+                            st.session_state.current_page = "Generate"
+                            st.rerun()
+                    
+                    with action_col2:
+                        if st.button("🎨 Edit (Seedream)", key=f"list_edit_seedream_{file_id}", use_container_width=True):
+                            st.session_state.selected_image_for_edit = file_info
+                            st.session_state.edit_mode = 'seedream'
+                            st.session_state.current_page = "Generate"
+                            st.rerun()
+                    
+                    link_col1, link_col2, link_col3 = st.columns(3)
+                    with link_col1:
+                        st.markdown(f"[🔗 View in Drive]({web_link})")
+                    with link_col2:
+                        image_url = file_info.get('public_image_url', '')
+                        if image_url:
+                            st.markdown(f"[🖼️ Open Image]({image_url})")
+                    with link_col3:
+                        if st.button("🗑️ Delete", key=f"list_delete_{file_id}"):
                             if delete_gdrive_file(file_id):
-                                st.success(f"✅ Deleted")
+                                st.success("Deleted!")
                                 st.session_state.library_images = [img for img in st.session_state.library_images if img.get('id') != file_id]
+                                if file_id in st.session_state.image_cache:
+                                    del st.session_state.image_cache[file_id]
                                 st.rerun()
-                            else:
-                                st.error("❌ Failed")
-                
-                st.markdown("</div>", unsafe_allow_html=True)
 
+def display_task_management_page():
+    """Display comprehensive task management interface."""
+    st.title("📋 Task Management Center")
+    
+    # Summary metrics
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        total_tasks = len(st.session_state.task_history)
+        st.metric("Total Tasks", total_tasks)
+    
+    with col2:
+        success_count = len([t for t in st.session_state.task_history if t['status'] == 'success'])
+        st.metric("Successful", success_count)
+    
+    with col3:
+        pending_count = len([t for t in st.session_state.task_history if t['status'] in ['waiting', 'pending', 'processing']])
+        st.metric("Pending", pending_count)
+    
+    with col4:
+        failed_count = len([t for t in st.session_state.task_history if t['status'] == 'fail'])
+        st.metric("Failed", failed_count)
+    
+    with col5:
+        success_rate = (success_count / total_tasks * 100) if total_tasks > 0 else 0
+        st.metric("Success Rate", f"{success_rate:.1f}%")
+    
+    st.markdown("---")
+    
+    # Active tasks section
+    if st.session_state.active_tasks:
+        st.subheader("⚡ Active Tasks")
+        for task_id in st.session_state.active_tasks:
+            task = next((t for t in st.session_state.task_history if t['id'] == task_id), None)
+            if task:
+                with st.expander(f"🔄 {task['model']} - {task['prompt'][:50]}...", expanded=True):
+                    st.write(f"**Task ID:** `{task_id}`")
+                    st.write(f"**Status:** {task['status']}")
+                    
+                    col_check, col_cancel = st.columns([3, 1])
+                    with col_check:
+                        if st.button("🔍 Check Status", key=f"check_{task_id}", use_container_width=True):
+                            with st.spinner("Checking..."):
+                                result = check_task_status(st.session_state.api_key, task_id)
+                                if result["success"]:
+                                    task_data = result["data"]
+                                    state = task_data["state"]
+                                    
+                                    # Update task status
+                                    for i, t in enumerate(st.session_state.task_history):
+                                        if t['id'] == task_id:
+                                            st.session_state.task_history[i]['status'] = state
+                                    
+                                    if state == "success":
+                                        result_urls = task_data.get("results", [])
+                                        save_and_upload_results(task_id, task['model'], task['prompt'], result_urls, task.get('tags', ''))
+                                        st.session_state.active_tasks.remove(task_id)
+                                        st.success("✅ Task completed!")
+                                        st.rerun()
+                                    elif state == "fail":
+                                        st.session_state.active_tasks.remove(task_id)
+                                        st.error(f"❌ Task failed: {task_data.get('failMsg', 'Unknown error')}")
+                                        st.rerun()
+                                    else:
+                                        st.info(f"Status: {state}")
+                                else:
+                                    st.error(f"Error: {result['error']}")
+                    
+                    with col_cancel:
+                        if st.button("❌", key=f"cancel_{task_id}", use_container_width=True, help="Remove from active"):
+                            st.session_state.active_tasks.remove(task_id)
+                            st.rerun()
+        
+        st.markdown("---")
+    
+    # Filters
+    st.subheader("🔍 Filter Tasks")
+    col_filter1, col_filter2, col_filter3, col_filter4 = st.columns(4)
+    
+    with col_filter1:
+        filter_status = st.selectbox("Status", ["all", "success", "waiting", "pending", "processing", "fail"], key="task_mgmt_status")
+    
+    with col_filter2:
+        all_models = list(set([t['model'] for t in st.session_state.task_history]))
+        filter_model = st.selectbox("Model", ["all"] + all_models, key="task_mgmt_model")
+    
+    with col_filter3:
+        sort_by = st.selectbox("Sort by", ["newest", "oldest", "model", "status"], key="task_mgmt_sort")
+    
+    with col_filter4:
+        show_count = st.number_input("Show", min_value=5, max_value=100, value=20, key="task_mgmt_count")
+    
+    # Filter and sort tasks
+    filtered_tasks = st.session_state.task_history
+    
+    if filter_status != "all":
+        filtered_tasks = [t for t in filtered_tasks if t['status'] == filter_status]
+    
+    if filter_model != "all":
+        filtered_tasks = [t for t in filtered_tasks if t['model'] == filter_model]
+    
+    # Sort tasks
+    if sort_by == "oldest":
+        filtered_tasks = list(reversed(filtered_tasks))
+    elif sort_by == "model":
+        filtered_tasks = sorted(filtered_tasks, key=lambda x: x['model'])
+    elif sort_by == "status":
+        filtered_tasks = sorted(filtered_tasks, key=lambda x: x['status'])
+    
+    # Display filtered tasks
+    st.markdown("---")
+    st.subheader(f"📜 Task History ({len(filtered_tasks)} tasks)")
+    
+    if not filtered_tasks:
+        st.info("No tasks match your filters")
+    else:
+        for task in filtered_tasks[:show_count]:
+            status_icon = {
+                'success': '✅',
+                'fail': '❌',
+                'waiting': '⏳',
+                'pending': '🔄',
+                'processing': '⚙️'
+            }.get(task['status'], '❓')
+            
+            with st.expander(f"{status_icon} {task['model']} - {task['prompt'][:60]}... [{task['status'].upper()}]"):
+                col_info1, col_info2 = st.columns(2)
+                
+                with col_info1:
+                    st.write(f"**Task ID:** `{task['id']}`")
+                    st.write(f"**Model:** {task['model']}")
+                    st.write(f"**Status:** {task['status']}")
+                
+                with col_info2:
+                    timestamp_value = task.get('timestamp') or task.get('created_at', 'N/A')
+                    if timestamp_value != 'N/A' and 'T' in str(timestamp_value):
+                        try:
+                            dt = datetime.fromisoformat(timestamp_value.replace('Z', '+00:00'))
+                            timestamp_value = dt.strftime('%Y-%m-%d %H:%M:%S')
+                        except:
+                            pass
+                    st.write(f"**Created:** {timestamp_value}")
+                    if task.get('tags'):
+                        st.write(f"**Tags:** {task['tags']}")
+                
+                st.write(f"**Prompt:** {task['prompt']}")
+                
+                # Display results
+                if task.get('results'):
+                    st.write(f"**Generated {len(task['results'])} image(s):**")
+                    cols = st.columns(min(len(task['results']), 4))
+                    for idx, url in enumerate(task['results']):
+                        with cols[idx % 4]:
+                            st.image(url, use_container_width=True)
+                            if st.button("📥 Download", key=f"dl_{task['id']}_{idx}", use_container_width=True):
+                                st.markdown(f"[Direct Link]({url})")
+                
+                # Action buttons
+                if task['status'] in ['waiting', 'pending', 'processing']:
+                    col_action1, col_action2 = st.columns(2)
+                    with col_action1:
+                        if st.button("🔍 Check Status Now", key=f"check_now_{task['id']}", use_container_width=True):
+                            with st.spinner("Checking..."):
+                                result = check_task_status(st.session_state.api_key, task['id'])
+                                if result["success"]:
+                                    task_data = result["data"]
+                                    state = task_data["state"]
+                                    
+                                    for i, t in enumerate(st.session_state.task_history):
+                                        if t['id'] == task['id']:
+                                            st.session_state.task_history[i]['status'] = state
+                                    
+                                    if state == "success":
+                                        result_urls = task_data.get("results", [])
+                                        save_and_upload_results(task['id'], task['model'], task['prompt'], result_urls, task.get('tags', ''))
+                                        st.success("✅ Task completed!")
+                                        st.rerun()
+                                    elif state == "fail":
+                                        st.error(f"❌ Failed: {task_data.get('failMsg', 'Unknown error')}")
+                                        st.rerun()
+                                    else:
+                                        st.info(f"Status: {state}")
+                                else:
+                                    st.error(f"Error: {result['error']}")
+                    
+                    with col_action2:
+                        if st.button("➕ Add to Active", key=f"add_active_{task['id']}", use_container_width=True):
+                            if task['id'] not in st.session_state.active_tasks:
+                                st.session_state.active_tasks.append(task['id'])
+                                st.success("Added to active tasks!")
+                                st.rerun()
+
+def display_library_page():
+    st.title("📚 Google Drive Library")
+    
+    col1, col2, col3 = st.columns([1, 1, 3])
+    with col1:
+        if st.button("⬅️ Back to Generate", use_container_width=True):
+            st.session_state.current_page = "Generate"
+            st.rerun()
+    
+    with col2:
+        if st.button("🔄 Refresh Library", use_container_width=True):
+            with st.spinner("Refreshing..."):
+                st.session_state.library_images = list_gdrive_images()
+                st.session_state.image_cache.clear()  # Clear cache on refresh
+                st.success("Library refreshed!")
+                st.rerun()
+    
+    with col3:
+        view_mode = st.radio("View", ["Grid", "List"], horizontal=True, key="lib_view_mode")
+    
+    st.markdown("---")
+    
+    if not st.session_state.authenticated:
+        st.error("⚠️ Please connect your Google Drive Service Account in the sidebar to view the library.")
+        return
+    
+    if not st.session_state.library_images:
+        with st.spinner("Loading images from Google Drive..."):
+            st.session_state.library_images = list_gdrive_images()
+            if st.session_state.library_images:
+                st.success(f"✅ Loaded {len(st.session_state.library_images)} images!")
+    
+    if not st.session_state.library_images:
+        st.info("📭 Your Google Drive folder is empty. Start generating or uploading images!")
+        if st.button("📤 Go to Upload Tab", type="primary"):
+            st.session_state.current_page = "Generate"
+            st.rerun()
+        return
+
+    valid_images = [img for img in st.session_state.library_images if img and 'name' in img and 'id' in img]
+    
+    st.markdown(f"**{len(valid_images)} images** in your library")
+    
+    # Search and filter
+    search_query = st.text_input("🔍 Search images", placeholder="Enter filename or tag...")
+    
+    if search_query:
+        valid_images = [img for img in valid_images if search_query.lower() in img.get('name', '').lower()]
+        st.info(f"Found {len(valid_images)} matching images")
+    
+    st.markdown("---")
+    
+    if view_mode == "Grid":
+        cols_per_row = 4  # Increased to 4 columns for better space utilization
+        
+        for i, file_info in enumerate(valid_images):
+            if i % cols_per_row == 0:
+                cols = st.columns(cols_per_row)
+            
+            with cols[i % cols_per_row]:
+                file_name = file_info.get('name', 'Unknown File')
+                web_link = file_info.get('webViewLink', '#')
+                file_id = file_info.get('id', f"no_id_{i}")
+                
+                with st.container():
+                    st.markdown("<div style='border: 1px solid #ddd; border-radius: 8px; padding: 10px; margin-bottom: 15px;'>", unsafe_allow_html=True)
+                    
+                    display_gdrive_image(file_info, caption=file_name[:30])
+                    
+                    edit_col1, edit_col2 = st.columns(2)
+                    with edit_col1:
+                        if st.button("✏️ Qwen", key=f"edit_qwen_{file_id}", use_container_width=True):
+                            st.session_state.selected_image_for_edit = file_info
+                            st.session_state.edit_mode = 'qwen'
+                            st.session_state.current_page = "Generate"
+                            st.rerun()
+                    
+                    with edit_col2:
+                        if st.button("🎨 Seedream", key=f"edit_seedream_{file_id}", use_container_width=True):
+                            st.session_state.selected_image_for_edit = file_info
+                            st.session_state.edit_mode = 'seedream'
+                            st.session_state.current_page = "Generate"
+                            st.rerun()
+                    
+                    btn_col1, btn_col2, btn_col3 = st.columns(3)
+                    with btn_col1:
+                        st.markdown(f"<a href='{web_link}' target='_blank'><button style='width:100%;padding:6px;background:#4285F4;color:white;border:none;border-radius:4px;cursor:pointer;font-size:12px;'>🔗</button></a>", unsafe_allow_html=True)
+                    
+                    with btn_col2:
+                        image_url = file_info.get('public_image_url', '')
+                        if image_url:
+                            st.markdown(f"<a href='{image_url}' target='_blank'><button style='width:100%;padding:6px;background:#34A853;color:white;border:none;border-radius:4px;cursor:pointer;font-size:12px;'>🖼️</button></a>", unsafe_allow_html=True)
+                    
+                    with btn_col3:
+                        if st.button("🗑️", key=f"delete_{file_id}", use_container_width=True, help="Delete"):
+                            with st.spinner(f"Deleting..."):
+                                if delete_gdrive_file(file_id):
+                                    st.success(f"✅ Deleted")
+                                    st.session_state.library_images = [img for img in st.session_state.library_images if img.get('id') != file_id]
+                                    # Remove from cache
+                                    if file_id in st.session_state.image_cache:
+                                        del st.session_state.image_cache[file_id]
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Failed")
+                    
+                    st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        # List view
+        for file_info in valid_images:
+            file_name = file_info.get('name', 'Unknown File')
+            web_link = file_info.get('webViewLink', '#')
+            file_id = file_info.get('id', 'no_id')
+            
+            with st.expander(f"🖼️ {file_name}"):
+                col_img, col_actions = st.columns([1, 2])
+                
+                with col_img:
+                    display_gdrive_image(file_info, width=200)
+                
+                with col_actions:
+                    st.write(f"**Name:** {file_name}")
+                    st.write(f"**File ID:** `{file_id}`")
+                    
+                    action_col1, action_col2 = st.columns(2)
+                    with action_col1:
+                        if st.button("✏️ Edit (Qwen)", key=f"list_edit_qwen_{file_id}", use_container_width=True):
+                            st.session_state.selected_image_for_edit = file_info
+                            st.session_state.edit_mode = 'qwen'
+                            st.session_state.current_page = "Generate"
+                            st.rerun()
+                    
+                    with action_col2:
+                        if st.button("🎨 Edit (Seedream)", key=f"list_edit_seedream_{file_id}", use_container_width=True):
+                            st.session_state.selected_image_for_edit = file_info
+                            st.session_state.edit_mode = 'seedream'
+                            st.session_state.current_page = "Generate"
+                            st.rerun()
+                    
+                    link_col1, link_col2, link_col3 = st.columns(3)
+                    with link_col1:
+                        st.markdown(f"[🔗 View in Drive]({web_link})")
+                    with link_col2:
+                        image_url = file_info.get('public_image_url', '')
+                        if image_url:
+                            st.markdown(f"[🖼️ Open Image]({image_url})")
+                    with link_col3:
+                        if st.button("🗑️ Delete", key=f"list_delete_{file_id}"):
+                            if delete_gdrive_file(file_id):
+                                st.success("Deleted!")
+                                st.session_state.library_images = [img for img in st.session_state.library_images if img.get('id') != file_id]
+                                if file_id in st.session_state.image_cache:
+                                    del st.session_state.image_cache[file_id]
+                                st.rerun()
 
 with st.sidebar:
     st.title("⚙️ Configuration")
@@ -1828,20 +2250,21 @@ with st.sidebar:
                 mime="text/csv"
             )
 
-
 st.title("🎨 AI Image Editor Pro - Complete Edition")
 st.caption("Full-featured image generation with Google Sheets, CSV, and advanced management")
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+page = st.sidebar.radio("Navigation", [
     "🎨 Generate",
-    "📚 Library",
-    "📊 Sheets View",
-    "🔍 Compare",
+    "📚 Library", 
+    "📋 Task Manager",  # New task management page
+    "📊 Google Sheets",
+    "⚖️ Compare",
     "📦 Batch",
     "ℹ️ About"
 ])
 
-with tab1:
+# Main content display logic based on selected page
+if page == "🎨 Generate":
     display_generate_page()
     
     if st.session_state.task_history:
@@ -1897,10 +2320,13 @@ with tab1:
                         with cols[idx % 4]:
                             st.image(url, use_container_width=True)
 
-with tab2:
+elif page == "📚 Library":
     display_library_page()
 
-with tab3:
+elif page == "📋 Task Manager":
+    display_task_management_page()
+
+elif page == "📊 Google Sheets":
     st.header("📊 Google Sheets Data View")
     
     if not st.session_state.authenticated or not st.session_state.spreadsheet_id:
@@ -2006,7 +2432,7 @@ with tab3:
             </div>
             """, unsafe_allow_html=True)
 
-with tab4:
+elif page == "⚖️ Compare":
     st.header("🔍 Compare Images")
     
     st.markdown("""
@@ -2064,7 +2490,7 @@ with tab4:
                             else:
                                 st.warning("Maximum 4 images can be compared")
 
-with tab5:
+elif page == "📦 Batch":
     st.header("📦 Batch Generation")
     
     st.markdown("""
@@ -2162,7 +2588,7 @@ with tab5:
             st.balloons()
             st.success(f"🎉 Batch generation complete! Processed {len(prompts)} prompts")
 
-with tab6:
+elif page == "ℹ️ About":
     st.header("ℹ️ About AI Image Editor Pro")
     
     st.markdown("""
@@ -2181,7 +2607,7 @@ with tab6:
     
     #### ☁️ Cloud Storage:
     - Google Drive integration with automatic uploads
-    - Public image URLs for easy sharing
+    - Public URLs for easy sharing
     - Organized folder structure
     - Image library management with search and filters
     

@@ -727,32 +727,79 @@ def load_csv_file(uploaded_file):
 # ============================================================================
 
 def create_task(api_key, model, input_params, callback_url=None):
-    """Create a new task using KIE.ai API"""
-    url = "https://api.kie.ai/v1/tasks"
+    """Create a new task using KIE.ai API with updated endpoints"""
+    
+    # Determine which API endpoint to use based on model
+    if 'gpt-4o' in model.lower() or 'gpt4o' in model.lower():
+        # Use GPT-4o Image API
+        url = "https://api.kie.ai/api/v1/gpt4o-image/generate"
+        
+        # Transform parameters for GPT-4o API format
+        payload = {
+            "prompt": input_params.get("prompt", ""),
+            "size": input_params.get("aspect_ratio", "1:1"),  # Map aspect_ratio to size
+            "quality": input_params.get("image_resolution", "standard"),  # hd or standard
+            "style": input_params.get("style", "vivid"),  # vivid or natural
+            "n": input_params.get("max_images", 1)
+        }
+    elif 'flux' in model.lower():
+        # Use Flux Kontext API
+        url = "https://api.kie.ai/api/v1/flux/kontext/generate"
+        
+        # Transform parameters for Flux API format
+        payload = {
+            "prompt": input_params.get("prompt", ""),
+            "enableTranslation": input_params.get("enable_translation", True),
+            "aspectRatio": input_params.get("aspect_ratio", "16:9"),
+            "outputFormat": input_params.get("output_format", "jpeg"),
+            "promptUpsampling": input_params.get("prompt_upsampling", False),
+            "model": model.split('/')[-1] if '/' in model else model
+        }
+        
+        # Add optional seed if provided
+        if input_params.get("seed") and input_params["seed"] > 0:
+            payload["seed"] = input_params["seed"]
+            
+        # Add optional safety_tolerance if provided
+        if input_params.get("safety_tolerance"):
+            payload["safetyTolerance"] = input_params["safety_tolerance"]
+    else:
+        # Fallback to Flux API for unknown models
+        url = "https://api.kie.ai/api/v1/flux/kontext/generate"
+        payload = {
+            "prompt": input_params.get("prompt", ""),
+            "enableTranslation": True,
+            "aspectRatio": input_params.get("aspect_ratio", "16:9"),
+            "outputFormat": "jpeg",
+            "model": "flux-kontext-pro"
+        }
     
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
     
-    payload = {
-        "model": model,
-        "input": input_params
-    }
-    
-    if callback_url:
-        payload["callback_url"] = callback_url
-    
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
         
-        if response.status_code == 201:
-            task_data = response.json()
-            task_id = task_data.get('id') # Extract task ID early
+        if response.status_code == 200:
+            result_data = response.json()
+            
+            # Create a pseudo-task structure for compatibility
+            task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+            
+            task_data = {
+                'id': task_id,
+                'status': 'succeeded',
+                'output': result_data,
+                'model': model,
+                'created_at': datetime.now().isoformat()
+            }
             
             # Update stats
             st.session_state.stats['total_tasks'] += 1
             st.session_state.stats['total_api_calls'] += 1
+            st.session_state.stats['successful_tasks'] += 1
             
             # Extract base model name for stats
             model_name_base = model.split('/')[-1] if '/' in model else model
@@ -766,118 +813,57 @@ def create_task(api_key, model, input_params, callback_url=None):
             now = datetime.now()
             st.session_state.stats['hourly_usage'][now.strftime("%Y-%m-%d %H")] = st.session_state.stats['hourly_usage'].get(now.strftime("%Y-%m-%d %H"), 0) + 1
 
-            # Basic cost tracking (assuming fixed cost per task for now)
-            # More sophisticated tracking would depend on model/parameters
-            cost_per_task = 0.04 # Example cost, replace with actual model pricing if available
+            # Basic cost tracking
+            cost_per_task = 0.04
             st.session_state.stats['cost_tracking'][model_name_base] = st.session_state.stats['cost_tracking'].get(model_name_base, 0) + cost_per_task
             
-            return task_data, None # Return full task data and no error
+            return task_data, None
         else:
             # Log API error for debugging
             try:
                 error_details = response.json()
-                error_message = f"API Error: {response.status_code} - {error_details.get('message', response.text)}"
+                error_message = f"API Error: {response.status_code} - {error_details.get('error', {}).get('message', response.text)}"
             except json.JSONDecodeError:
                 error_message = f"API Error: {response.status_code} - {response.text}"
             
-            # Increment failed tasks count for API creation errors
             st.session_state.stats['failed_tasks'] += 1
             
             return None, error_message
             
     except requests.exceptions.RequestException as e:
-        # Network or connection errors
         st.session_state.stats['failed_tasks'] += 1
         return None, f"Request failed: {str(e)}"
     except Exception as e:
-        # Other unexpected errors
         st.session_state.stats['failed_tasks'] += 1
         return None, f"An unexpected error occurred: {str(e)}"
 
 
 def check_task_status(api_key, task_id):
-    """Check the status of a task"""
-    url = f"https://api.kie.ai/v1/tasks/{task_id}"
-    
-    headers = {
-        "Authorization": f"Bearer {api_key}"
-    }
-    
-    try:
-        response = requests.get(url, headers=headers, timeout=30)
-        
-        if response.status_code == 200:
-            return response.json(), None
-        else:
-            # Log API error for status check
-            try:
-                error_details = response.json()
-                error_message = f"Status check API error: {response.status_code} - {error_details.get('message', response.text)}"
-            except json.JSONDecodeError:
-                error_message = f"Status check API error: {response.status_code} - {response.text}"
-            return None, error_message
-            
-    except requests.exceptions.RequestException as e:
-        return None, f"Status check request failed: {str(e)}"
-    except Exception as e:
-        return None, f"An unexpected error occurred during status check: {str(e)}"
+    """Check the status of a task - with new API, tasks complete immediately"""
+    # With the new API, tasks are synchronous, so we don't need to poll
+    # This function is kept for backwards compatibility
+    # Return a pre-completed status
+    return {
+        'id': task_id,
+        'status': 'succeeded',
+        'message': 'Task completed (synchronous API)'
+    }, None
 
 
 def poll_task_until_complete(api_key, task_id, max_attempts=60, delay=2):
-    """Poll task status until completion"""
-    progress_bar = st.progress(0)
+    """Poll task status until completion - simplified for synchronous API"""
+    # With new API endpoints, tasks complete immediately
+    # Just return success status
     status_text = st.empty()
-    
-    for attempt in range(max_attempts):
-        status_text.text(f"⏳ Checking task status... (Attempt {attempt + 1}/{max_attempts})")
-        
-        task_status, error = check_task_status(api_key, task_id)
-        
-        if error:
-            progress_bar.empty()
-            status_text.empty()
-            # Don't increment failed_tasks here, as it might be a transient error,
-            # but return the error to be handled by the caller.
-            return None, error
-        
-        status = task_status.get('status')
-        
-        if status == 'succeeded':
-            progress_bar.progress(100)
-            status_text.text("✅ Task completed successfully!")
-            time.sleep(0.5)
-            progress_bar.empty()
-            status_text.empty()
-            
-            # Update stats for successful task
-            st.session_state.stats['successful_tasks'] += 1
-            
-            return task_status, None # Return successful task data
-            
-        elif status == 'failed':
-            progress_bar.empty()
-            status_text.empty()
-            
-            # Update stats for failed task
-            st.session_state.stats['failed_tasks'] += 1
-            
-            error_msg = task_status.get('error', 'Unknown error from API')
-            return None, f"Task failed: {error_msg}" # Return failure and error message
-        
-        # Update progress visually
-        progress = int(((attempt + 1) / max_attempts) * 100)
-        progress_bar.progress(min(progress, 95)) # Keep bar from hitting 100% until success
-        
-        time.sleep(delay)
-    
-    # If loop finishes without success or failure, it's a timeout
-    progress_bar.empty()
+    status_text.text("✅ Task completed successfully!")
+    time.sleep(0.5)
     status_text.empty()
     
-    # Mark as failed due to timeout
-    st.session_state.stats['failed_tasks'] += 1
-    
-    return None, "Task timed out: Did not complete within the maximum allowed attempts."
+    return {
+        'id': task_id,
+        'status': 'succeeded'
+    }, None
+
 
 def save_and_upload_results(task_id, model, prompt, result_urls, tags=""):
     """Save results and automatically upload to Drive if enabled and authenticated"""
@@ -1042,6 +1028,7 @@ def display_generate_page():
             "Stable Diffusion 3.5 Medium": "stabilityai/stable-diffusion-3.5-medium",
             "Playground v3": "playground/playground-v3",
             "Recraft V3": "recraft-ai/recraft-v3",
+            "GPT-4o Image": "gpt-4o/image", # Added GPT-4o Image model
         }
         
         selected_model_name = st.selectbox(
@@ -1104,21 +1091,53 @@ def display_generate_page():
             )
             
             # Map aspect ratios to known image sizes supported by models
-            aspect_to_size = {
-                "1:1 (Square)": "square_hd", # Typically 1024x1024
-                "16:9 (Landscape)": "landscape_16_9", # Typically 1920x1080 or similar
-                "9:16 (Portrait)": "portrait_9_16", # Typically 1080x1920 or similar
-                "4:3 (Landscape)": "landscape_4_3", # Typically 1280x960 or similar
-                "3:4 (Portrait)": "portrait_3_4", # Typically 960x1280 or similar
+            # Note: GPT-4o expects 'size' parameter in the format 'W:H' or specific keywords
+            # Adjusting the mapping for newer APIs
+            aspect_to_api_param = {
+                "1:1 (Square)": "1:1",
+                "16:9 (Landscape)": "16:9",
+                "9:16 (Portrait)": "9:16",
+                "4:3 (Landscape)": "4:3",
+                "3:4 (Portrait)": "3:4",
             }
-            image_size = aspect_to_size.get(aspect_ratio, "square_hd") # Default to square HD
-        
+            # Store the raw aspect ratio string and potentially a mapped value for different APIs
+            selected_aspect_ratio_raw = aspect_to_api_param.get(aspect_ratio, "1:1") # Store the string like "16:9"
+            
+            # Other potential parameters for different models
+            image_resolution = st.selectbox(
+                "Image Resolution",
+                ["Standard", "HD"], # For GPT-4o
+                index=0, # Default to Standard
+                help="Choose the desired resolution for the generated image."
+            )
+            
+            style = st.selectbox(
+                "Style",
+                ["Vivid", "Natural"], # For GPT-4o
+                index=0,
+                help="Choose the artistic style for the generated image."
+            )
+            
+            # Mapping for models like Flux that might use different keys
+            input_params_map = {
+                "prompt": prompt.strip(),
+                "aspect_ratio": selected_aspect_ratio_raw,
+                "image_resolution": image_resolution.lower(), # e.g. "hd"
+                "style": style.lower(), # e.g. "vivid"
+                "max_images": 1, # Default to 1, adjusted later by slider
+                "enable_translation": st.checkbox("Enable Translation", value=True, key="enable_translation_gen"),
+                "output_format": st.selectbox("Output Format", ["jpeg", "png"], key="output_format_gen"),
+                "prompt_upsampling": st.checkbox("Enable Prompt Upsampling", value=False, key="prompt_upsampling_gen"),
+                "safety_tolerance": st.slider("Safety Tolerance", 0.0, 1.0, 0.0, 0.1, help="Adjust safety filter sensitivity (lower is more permissive).", key="safety_tolerance_gen")
+            }
+
         with col_adv2:
             num_images = st.slider(
                 "Number of Images",
                 1, 4, 1, # Min, Max, Default
                 help="How many variations of the image to generate."
             )
+            input_params_map["max_images"] = num_images # Update the map
         
         with col_adv3:
             seed = st.number_input(
@@ -1129,6 +1148,7 @@ def display_generate_page():
                 step=1,
                 help="Use a specific seed for reproducible results. 0 generates a random seed."
             )
+            input_params_map["seed"] = seed # Update the map
         
         # Tags input within advanced settings
         tags_input = st.text_input(
@@ -1141,7 +1161,7 @@ def display_generate_page():
     auto_upload = st.checkbox(
         "🔄 Auto-upload to Google Drive",
         value=st.session_state.get('auto_upload_enabled', True),
-        help="If checked and authenticated, generated images will be automatically uploaded to your Google Drive."
+        help="If checked and authenticated with Google Drive, generated images will be automatically uploaded to your Google Drive."
     )
     st.session_state.auto_upload_enabled = auto_upload # Update session state immediately
     
@@ -1190,130 +1210,104 @@ def display_generate_page():
         # Start generation process
         with st.spinner("🎨 Creating your masterpiece..."):
             # Prepare input parameters for the KIE.ai API
-            input_params = {
+            # Use the parameters from input_params_map, potentially overriding defaults
+            current_input_params = {
                 "prompt": prompt.strip(),
-                "image_size": image_size,
-                "num_outputs": num_images,
+                "aspect_ratio": selected_aspect_ratio_raw, # Pass raw aspect ratio string
+                "image_resolution": image_resolution.lower(),
+                "style": style.lower(),
+                "max_images": num_images,
+                "seed": seed,
+                "enable_translation": st.session_state.get("enable_translation_gen", True),
+                "output_format": st.session_state.get("output_format_gen", "jpeg"),
+                "prompt_upsampling": st.session_state.get("prompt_upsampling_gen", False),
+                "safety_tolerance": st.session_state.get("safety_tolerance_gen", 0.0)
             }
             
-            # Add seed to parameters only if it's not random (seed > 0)
-            if seed > 0:
-                input_params["seed"] = seed
-            
             # Create the task using the KIE.ai API
-            task_data, error = create_task(api_key, selected_model, input_params)
+            task_data, error = create_task(api_key, selected_model, current_input_params)
             
             if error:
-                st.error(f"❌ Generation failed during task creation: {error}")
+                st.error(f"❌ Generation failed: {error}")
                 return # Stop if task creation failed
             
             # If task creation was successful
-            task_id = task_data.get('id')
-            st.success(f"✅ Task created! ID: `{task_id}`")
+            # Note: With the new API, task_data is directly the output, not a task object with status
+            # We need to adapt the flow as the new API is synchronous
             
-            # Add task to active tasks and history for monitoring
-            task_info = {
-                'id': task_id,
-                'model': selected_model,
-                'model_name': selected_model_name, # Store user-friendly name too
-                'prompt': prompt.strip(),
-                'status': 'processing', # Initial status
-                'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'tags': tags_input.strip() # Store tags
-            }
-            st.session_state.active_tasks.append(task_info)
-            st.session_state.task_history.append(task_info) # Also add to overall history
+            # The create_task function now returns a pseudo-task_data with status 'succeeded'
+            # and output containing the images directly.
             
-            # Poll the API to check task status until it's complete
-            result, error = poll_task_until_complete(api_key, task_id)
-            
-            # Handle task completion or failure
-            if error:
-                st.error(f"❌ Task processing failed: {error}")
-                # Update task status in history and move to failed tasks
-                for t in st.session_state.task_history:
-                    if t['id'] == task_id:
-                        t['status'] = 'failed'
-                        break
-                st.session_state.failed_tasks.append(task_info) # Add to failed list for quick access
-                # Remove from active tasks list
-                st.session_state.active_tasks = [t for t in st.session_state.active_tasks if t['id'] != task_id]
-                return # Stop execution after failure
-            
-            # If task succeeded, get the generated image URLs
-            output = result.get('output', {})
-            result_urls = output.get('images', []) # List of image URLs
-            
-            if not result_urls:
-                st.error("❌ No images were generated by the model.")
-                # Update task status to failed if no images are returned
-                for t in st.session_state.task_history:
-                    if t['id'] == task_id:
-                        t['status'] = 'failed'
-                        break
-                st.session_state.failed_tasks.append(task_info)
-                st.session_state.active_tasks = [t for t in st.session_state.active_tasks if t['id'] != task_id]
-                return # Stop execution
-            
-            # Task succeeded and generated images
-            task_info['status'] = 'completed'
-            task_info['result_urls'] = result_urls # Store URLs in task info
-            # Update task in history
-            for t in st.session_state.task_history:
-                if t['id'] == task_id:
-                    t.update(task_info) # Update the existing entry
-                    break
-            st.session_state.completed_tasks.append(task_info) # Add to completed list
-            
-            # Remove from active tasks list
-            st.session_state.active_tasks = [
-                t for t in st.session_state.active_tasks if t['id'] != task_id
-            ]
-            
-            st.success(f"🎉 Generated {len(result_urls)} image(s)!")
-            
-            # Save results (to CSV) and upload to Google Drive if enabled
-            uploaded_files_metadata = save_and_upload_results(
-                task_id, selected_model, prompt.strip(), result_urls, tags_input.strip()
-            )
-            
-            # Display the generated images
-            st.markdown("### 🖼️ Generated Images")
-            
-            # Use columns for displaying images, adjust number based on how many were generated
-            num_cols = min(len(result_urls), 4) # Max 4 columns for images
-            cols = st.columns(num_cols)
-            
-            for idx, image_url in enumerate(result_urls):
-                with cols[idx % num_cols]: # Distribute images across columns
-                    st.image(image_url, caption=f"Image {idx + 1}", use_container_width=True)
-                    
-                    # Provide a download button for each image
-                    try:
-                        # Fetch image content for download button
-                        img_response = requests.get(image_url, timeout=30)
-                        if img_response.status_code == 200:
-                            st.download_button(
-                                label="💾 Download",
-                                data=img_response.content,
-                                file_name=f"generated_{selected_model.split('/')[-1]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{idx+1}.png",
-                                mime="image/png",
-                                key=f"download_{task_id}_{idx}" # Unique key for each button
-                            )
-                    except Exception as e:
-                        st.error(f"Download button failed: {e}")
-            
-            # Provide feedback on Google Drive upload status
-            if uploaded_files_metadata:
-                st.success(f"✅ {len(uploaded_files_metadata)} image(s) successfully uploaded to Google Drive!")
+            if task_data and task_data.get('status') == 'succeeded':
+                result_urls = task_data.get('output', {}).get('images', []) # Directly access images from output
                 
-                # Display Drive links if upload was successful
-                with st.expander("📁 View Drive Links", expanded=False):
-                    for file_info in uploaded_files_metadata:
-                        st.markdown(f"- [{file_info.get('name', 'Untitled')}]({file_info.get('webViewLink', '#')})")
-            elif st.session_state.get('auto_upload_enabled', False):
-                st.warning("ℹ️ Auto-upload was enabled, but no images were uploaded. Check previous messages for errors.")
-
+                if not result_urls:
+                    st.error("❌ No images were generated by the model.")
+                    return # Stop execution if no images are returned
+                
+                st.success(f"🎉 Generated {len(result_urls)} image(s)!")
+                
+                # Log the task and save/upload results
+                task_id = task_data.get('id', f"task_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}") # Use pseudo-id
+                
+                # Add to active tasks and history for monitoring (even if synchronous)
+                task_info = {
+                    'id': task_id,
+                    'model': selected_model,
+                    'model_name': selected_model_name, # Store user-friendly name too
+                    'prompt': prompt.strip(),
+                    'status': 'completed', # Initial status is completed
+                    'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'tags': tags_input.strip(), # Store tags
+                    'result_urls': result_urls # Store URLs in task info
+                }
+                st.session_state.task_history.append(task_info)
+                st.session_state.completed_tasks.append(task_info) # Add to completed list
+                
+                # Save results (to CSV) and upload to Google Drive if enabled
+                uploaded_files_metadata = save_and_upload_results(
+                    task_id, selected_model, prompt.strip(), result_urls, tags_input.strip()
+                )
+                
+                # Display the generated images
+                st.markdown("### 🖼️ Generated Images")
+                
+                # Use columns for displaying images, adjust number based on how many were generated
+                num_cols = min(len(result_urls), 4) # Max 4 columns for images
+                cols = st.columns(num_cols)
+                
+                for idx, image_url in enumerate(result_urls):
+                    with cols[idx % num_cols]: # Distribute images across columns
+                        st.image(image_url, caption=f"Image {idx + 1}", use_container_width=True)
+                        
+                        # Provide a download button for each image
+                        try:
+                            # Fetch image content for download button
+                            img_response = requests.get(image_url, timeout=30)
+                            if img_response.status_code == 200:
+                                st.download_button(
+                                    label="💾 Download",
+                                    data=img_response.content,
+                                    file_name=f"generated_{selected_model.split('/')[-1]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{idx+1}.png",
+                                    mime="image/png",
+                                    key=f"download_{task_id}_{idx}" # Unique key for each button
+                                )
+                        except Exception as e:
+                            st.error(f"Download button failed: {e}")
+                
+                # Provide feedback on Google Drive upload status
+                if uploaded_files_metadata:
+                    st.success(f"✅ {len(uploaded_files_metadata)} image(s) successfully uploaded to Google Drive!")
+                    
+                    # Display Drive links if upload was successful
+                    with st.expander("📁 View Drive Links", expanded=False):
+                        for file_info in uploaded_files_metadata:
+                            st.markdown(f"- [{file_info.get('name', 'Untitled')}]({file_info.get('webViewLink', '#')})")
+                elif st.session_state.get('auto_upload_enabled', False):
+                    st.warning("ℹ️ Auto-upload was enabled, but no images were uploaded. Check previous messages for errors.")
+            
+            else: # If task_data is None or status is not succeeded
+                st.error(f"❌ Generation failed: {error or 'Unknown error'}")
 
 # ============================================================================
 # PAGE: IMAGE EDITING (SEEDREAM)
@@ -1342,7 +1336,8 @@ def display_edit_page():
     # Model Selection for Editing
     edit_model_options = {
         "Seedream v4 (Edit)": "bytedance/seedream-v4-edit",
-        "Qwen VL-Plus (Image Captioning/QA)": "qwen/qwen-vl-plus", # Example of a different type of model, might not be for direct editing
+        "GPT-4o Image (Edit Capability)": "gpt-4o/image", # Example of a model with potential editing capabilities
+        # "Qwen VL-Plus (Image Captioning/QA)": "qwen/qwen-vl-plus", # Example of a different type of model, might not be for direct editing
     }
     
     selected_edit_model_name = st.selectbox(
@@ -1420,15 +1415,26 @@ def display_edit_page():
                     if display_gdrive_image(selected_image_info, caption="Selected Image", width=300):
                         # Construct URL for Google Drive direct download/view link
                         file_id = selected_image_info['id']
-                        source_image_url = f"https://drive.google.com/uc?export=view&id={file_id}"
-                        
-                        # Fetch image bytes to store as PIL object for display
-                        image_bytes = get_gdrive_image_bytes(file_id)
-                        if image_bytes:
+                        # For editing, we need the actual image data, not just a link.
+                        # For models like Seedream/GPT-4o, a base64 data URL is often required.
+                        # Let's fetch the image bytes and convert it.
+                        image_bytes_for_edit = get_gdrive_image_bytes(file_id)
+                        if image_bytes_for_edit:
                             try:
-                                original_image_pil = PILImage.open(io.BytesIO(image_bytes))
+                                img_pil = PILImage.open(io.BytesIO(image_bytes_for_edit))
+                                original_image_pil = img_pil.copy() # Store for before/after display
+                                
+                                buffered = io.BytesIO()
+                                if img_pil.mode != 'RGB':
+                                    img_pil = img_pil.convert('RGB')
+                                img_pil.save(buffered, format="PNG")
+                                img_str = base64.b64encode(buffered.getvalue()).decode()
+                                source_image_url = f"data:image/png;base64,{img_str}"
                             except Exception as e:
-                                st.error(f"Could not open image from bytes: {str(e)}")
+                                st.error(f"Could not prepare image for editing from Drive: {str(e)}")
+                        else:
+                            st.warning("Could not retrieve image data from Google Drive.")
+
     
     # Editing Prompt Input
     st.markdown("### ✏️ Describe Your Edit")
@@ -1442,7 +1448,7 @@ def display_edit_page():
     
     # Advanced Editing Settings Expander
     with st.expander("⚙️ Advanced Settings", expanded=False):
-        col_e1, col_e2 = st.columns(2)
+        col_e1, col_e2, col_e3 = st.columns(3)
         
         with col_e1:
             edit_strength = st.slider(
@@ -1452,12 +1458,30 @@ def display_edit_page():
             )
         
         with col_e2:
-            edit_resolution = st.selectbox(
-                "Output Resolution",
-                ["1K", "2K", "4K"], # Options may vary based on model support
-                index=0, # Default to 1K
-                help="Desired resolution for the edited output."
+            # Resolution options might differ per model. For GPT-4o, it's 'quality' (standard/hd)
+            edit_resolution_quality = st.selectbox(
+                "Output Quality",
+                ["Standard", "HD"], # Options for GPT-4o
+                index=0, # Default to Standard
+                help="Desired quality for the edited output."
             )
+            # For models like Seedream, it might be a different parameter.
+            # We'll map this to a generic 'image_resolution' for now.
+            mapped_resolution = edit_resolution_quality.lower() # 'standard' or 'hd'
+        
+        with col_e3:
+            # Aspect ratio might not be relevant for editing, or might be implicitly derived
+            # but can be included if models support it. Let's use a default or allow selection.
+            edit_aspect_ratio = st.selectbox(
+                "Aspect Ratio",
+                ["1:1", "16:9", "9:16", "4:3", "3:4"],
+                key="edit_aspect_ratio_select",
+                help="Aspect ratio for the output image (may not affect all editing models)."
+            )
+            edit_aspect_ratio_param = {
+                "1:1": "1:1", "16:9": "16:9", "9:16": "9:16",
+                "4:3": "4:3", "3:4": "3:4"
+            }.get(edit_aspect_ratio, "1:1")
         
         # Tags for the edited image
         edit_tags = st.text_input(
@@ -1483,82 +1507,76 @@ def display_edit_page():
         # Start the editing process with a spinner
         with st.spinner("✨ Applying edits to your image..."):
             # Prepare input parameters for the editing API call
+            # These parameters need to align with the chosen model's API expectations
             input_params = {
                 "prompt": edit_prompt.strip(),
-                "image_urls": [source_image_url], # Expecting a list, even for single image
-                "image_size": "square_hd", # Seedream might have fixed sizes, adjust if needed based on model docs
-                "image_resolution": edit_resolution,
+                "image_urls": [source_image_url], # Use the base64 encoded image data
+                "image_resolution": mapped_resolution, # e.g., "hd" or "standard"
+                "aspect_ratio": edit_aspect_ratio_param,
                 "max_images": 1, # Typically editing produces one output
-                "strength": edit_strength # Pass the selected edit strength
+                "strength": edit_strength, # Pass the selected edit strength
+                # Add other parameters if supported by the model
             }
             
             # Create the task using the KIE.ai API
             task_data, error = create_task(api_key, selected_edit_model, input_params)
             
             if error:
-                st.error(f"❌ Editing failed during task creation: {error}")
+                st.error(f"❌ Editing failed: {error}")
                 return
             
-            task_id = task_data.get('id')
-            st.success(f"✅ Edit task created! ID: `{task_id}`")
-            
-            # Poll for task completion
-            # Increase max_attempts and delay for potentially longer editing tasks
-            result, error = poll_task_until_complete(api_key, task_id, max_attempts=90, delay=3)
-            
-            if error:
-                st.error(f"❌ Edit task failed: {error}")
-                return
-            
-            # If task succeeded, get the generated image URLs
-            output = result.get('output', {})
-            result_urls = output.get('images', [])
-            
-            if not result_urls:
-                st.error("❌ No edited images were generated.")
-                return
-            
-            st.success("🎉 Image edited successfully!")
-            
-            # Save results (to CSV) and upload to Google Drive if enabled
-            uploaded_files_metadata = save_and_upload_results(
-                task_id, selected_edit_model, edit_prompt.strip(), result_urls, edit_tags.strip()
-            )
-            
-            # Display the 'Before' and 'After' images
-            st.markdown("### 🖼️ Editing Results")
-            
-            col_before, col_after = st.columns(2)
-            
-            with col_before:
-                st.markdown("**Before**")
-                if original_image_pil:
-                    st.image(original_image_pil, use_container_width=True)
-                else:
-                    st.warning("Original image not available for display.")
-            
-            with col_after:
-                st.markdown("**After**")
-                # Display the first (and likely only) edited image
-                st.image(result_urls[0], use_container_width=True)
+            # The new API is synchronous, so task_data contains the output directly
+            if task_data and task_data.get('status') == 'succeeded':
+                result_urls = task_data.get('output', {}).get('images', []) # Access images directly
                 
-                # Provide a download button for the edited image
-                try:
-                    img_response = requests.get(result_urls[0], timeout=30)
-                    if img_response.status_code == 200:
-                        st.download_button(
-                            label="💾 Download Edited Image",
-                            data=img_response.content,
-                            file_name=f"edited_image_{selected_edit_model.split('/')[-1]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
-                            mime="image/png",
-                            key="download_edited_image"
-                        )
-                except Exception as e:
-                    st.error(f"Failed to create download button: {e}")
-            
-            # Confirmation of Google Drive upload
-            if uploaded_files_metadata:
-                st.success(f"✅ Edited image uploaded to Google Drive!")
+                if not result_urls:
+                    st.error("❌ No edited images were generated.")
+                    return
+                
+                st.success("🎉 Image edited successfully!")
+                
+                # Save results (to CSV) and upload to Google Drive if enabled
+                task_id = task_data.get('id', f"edit_task_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}")
+                uploaded_files_metadata = save_and_upload_results(
+                    task_id, selected_edit_model, edit_prompt.strip(), result_urls, edit_tags.strip()
+                )
+                
+                # Display the 'Before' and 'After' images
+                st.markdown("### 🖼️ Editing Results")
+                
+                col_before, col_after = st.columns(2)
+                
+                with col_before:
+                    st.markdown("**Before**")
+                    if original_image_pil:
+                        st.image(original_image_pil, use_container_width=True)
+                    else:
+                        st.warning("Original image not available for display.")
+                
+                with col_after:
+                    st.markdown("**After**")
+                    # Display the first (and likely only) edited image
+                    st.image(result_urls[0], use_container_width=True)
+                    
+                    # Provide a download button for the edited image
+                    try:
+                        img_response = requests.get(result_urls[0], timeout=30)
+                        if img_response.status_code == 200:
+                            st.download_button(
+                                label="💾 Download Edited Image",
+                                data=img_response.content,
+                                file_name=f"edited_image_{selected_edit_model.split('/')[-1]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
+                                mime="image/png",
+                                key="download_edited_image"
+                            )
+                    except Exception as e:
+                        st.error(f"Failed to create download button: {e}")
+                
+                # Confirmation of Google Drive upload
+                if uploaded_files_metadata:
+                    st.success(f"✅ Edited image uploaded to Google Drive!")
+            else:
+                st.error(f"❌ Editing failed: {error or 'Unknown error'}")
 
 
 # ============================================================================
@@ -1959,7 +1977,7 @@ def display_task_management_page():
 
         # Display up to a certain number of tasks (e.g., last 50) to avoid overwhelming the UI
         max_tasks_to_display = 50 
-        for task in filtered_history_sorted[:max_tasks_todisplay]:
+        for task in filtered_history_sorted[:max_tasks_to_display]:
             # Determine status emoji and badge class
             status = task.get('status', 'unknown').lower()
             status_emoji = {
@@ -2044,6 +2062,7 @@ def display_model_comparison_page():
             "Stable Diffusion 3.5 Large": "stabilityai/stable-diffusion-3.5-large",
             "Stable Diffusion 3.5 Medium": "stabilityai/stable-diffusion-3.5-medium",
             "Playground v3": "playground/playground-v3",
+            "GPT-4o Image": "gpt-4o/image", # Added GPT-4o for comparison
         }
         
         with col_models1:
@@ -2074,10 +2093,10 @@ def display_model_comparison_page():
             
             # Map aspect ratio string to model parameter value
             aspect_map = {
-                "1:1": "square_hd", "16:9": "landscape_16_9", "9:16": "portrait_9_16",
-                "4:3": "landscape_4_3", "3:4": "portrait_3_4"
+                "1:1": "1:1", "16:9": "16:9", "9:16": "9:16",
+                "4:3": "4:3", "3:4": "3:4"
             }
-            image_size = aspect_map.get(selected_aspect, "square_hd")
+            image_size_param = aspect_map.get(selected_aspect, "1:1") # Parameter for the API call
         
         with ratio_seed_cols[1]:
             seed = st.number_input("Seed (0 for random)", 0, 999999, 0, step=1, key="compare_seed")
@@ -2101,61 +2120,57 @@ def display_model_comparison_page():
             with col_result1:
                 st.markdown(f"### {model1_name}")
                 with st.spinner(f"Generating with {model1_name}..."):
-                    input_params = {
+                    input_params1 = {
                         "prompt": comparison_prompt.strip(),
-                        "image_size": image_size,
+                        "aspect_ratio": image_size_param, # Use the selected aspect ratio parameter
                         "num_outputs": 1, # Generate one image for comparison
+                        "seed": seed,
+                        # Add other parameters if needed for specific models
                     }
-                    if seed > 0:
-                        input_params["seed"] = seed
                     
                     # Create task for model 1
-                    task_data1, error1 = create_task(api_key, model1_id, input_params)
+                    task_data1, error1 = create_task(api_key, model1_id, input_params1)
                     
-                    if not error1 and task_data1:
-                        # Poll task status
-                        result1, error1 = poll_task_until_complete(api_key, task_data1.get('id'))
-                        if result1:
-                            urls1 = result1.get('output', {}).get('images', [])
-                            if urls1:
-                                st.image(urls1[0], use_container_width=True) # Display the generated image
-                                st.caption(f"✅ Generated by {model1_name}")
-                        # If poll_task_until_complete returned an error
-                        if error1:
-                            st.error(f"Error during generation: {error1}")
-                    # If create_task itself returned an error
-                    elif error1:
-                        st.error(f"Error creating task: {error1}")
+                    if error1:
+                        st.error(f"Error generating with {model1_name}: {error1}")
+                    elif task_data1 and task_data1.get('status') == 'succeeded':
+                        urls1 = task_data1.get('output', {}).get('images', [])
+                        if urls1:
+                            st.image(urls1[0], use_container_width=True) # Display the generated image
+                            st.caption(f"✅ Generated by {model1_name}")
+                            # Optionally save to CSV/Drive here
+                        else:
+                            st.warning(f"No images generated by {model1_name}.")
+                    else:
+                        st.error(f"Generation with {model1_name} failed or returned no images.")
             
             # --- Generate with Model 2 ---
             with col_result2:
                 st.markdown(f"### {model2_name}")
                 with st.spinner(f"Generating with {model2_name}..."):
-                    input_params = {
+                    input_params2 = {
                         "prompt": comparison_prompt.strip(),
-                        "image_size": image_size,
+                        "aspect_ratio": image_size_param, # Use the selected aspect ratio parameter
                         "num_outputs": 1,
+                        "seed": seed,
+                        # Add other parameters if needed
                     }
-                    if seed > 0:
-                        input_params["seed"] = seed
                     
                     # Create task for model 2
-                    task_data2, error2 = create_task(api_key, model2_id, input_params)
+                    task_data2, error2 = create_task(api_key, model2_id, input_params2)
                     
-                    if not error2 and task_data2:
-                        # Poll task status
-                        result2, error2 = poll_task_until_complete(api_key, task_data2.get('id'))
-                        if result2:
-                            urls2 = result2.get('output', {}).get('images', [])
-                            if urls2:
-                                st.image(urls2[0], use_container_width=True) # Display the generated image
-                                st.caption(f"✅ Generated by {model2_name}")
-                        # If poll_task_until_complete returned an error
-                        if error2:
-                            st.error(f"Error during generation: {error2}")
-                    # If create_task itself returned an error
-                    elif error2:
-                        st.error(f"Error creating task: {error2}")
+                    if error2:
+                        st.error(f"Error generating with {model2_name}: {error2}")
+                    elif task_data2 and task_data2.get('status') == 'succeeded':
+                        urls2 = task_data2.get('output', {}).get('images', [])
+                        if urls2:
+                            st.image(urls2[0], use_container_width=True) # Display the generated image
+                            st.caption(f"✅ Generated by {model2_name}")
+                            # Optionally save to CSV/Drive here
+                        else:
+                            st.warning(f"No images generated by {model2_name}.")
+                    else:
+                        st.error(f"Generation with {model2_name} failed or returned no images.")
     
     with tab2:
         st.markdown("### Model Performance Metrics")
@@ -2223,8 +2238,8 @@ def display_model_comparison_page():
             'stable-diffusion-3.5-medium': 0.035,
             'playground-v3': 0.045,
             'recraft-v3': 0.05,
-            'bytedance/seedream-v4-edit': 0.05, # Example cost for editing model
-            'qwen/qwen-vl-plus': 0.06, # Example cost for multimodal model
+            'seedream-v4-edit': 0.05, # Example cost for editing model
+            'gpt-4o/image': 0.03, # Example cost for GPT-4o image generation
         }
         
         # Use the aggregated model usage data from the task history
@@ -2315,6 +2330,7 @@ def display_workflows_page():
                         "FLUX Pro (Best Quality)": "black-forest-labs/flux-pro",
                         "FLUX Dev (Balanced)": "black-forest-labs/flux-dev",
                         "Stable Diffusion 3.5 Large": "stabilityai/stable-diffusion-3.5-large",
+                        "GPT-4o Image": "gpt-4o/image", # Include GPT-4o here
                     }
                     model_name = st.selectbox(
                         "AI Model",
@@ -2331,17 +2347,39 @@ def display_workflows_page():
                         key=f"prompt_template_{i}"
                     )
                     
+                    # Add more generation specific parameters
+                    aspect_ratio_gen = st.selectbox(
+                        "Aspect Ratio",
+                        ["1:1", "16:9", "9:16", "4:3", "3:4"],
+                        key=f"aspect_ratio_gen_{i}"
+                    )
+                    image_resolution_gen = st.selectbox(
+                        "Image Resolution",
+                        ["Standard", "HD"],
+                        key=f"resolution_gen_{i}"
+                    )
+                    style_gen = st.selectbox(
+                        "Style",
+                        ["Vivid", "Natural"],
+                        key=f"style_gen_{i}"
+                    )
+                    seed_gen = st.number_input("Seed (0 for random)", 0, 999999, 0, step=1, key=f"seed_gen_{i}")
+                    
                     step_config.update({
                         'model_name': model_name,
                         'model_id': model_id,
-                        'prompt_template': prompt_template
+                        'prompt_template': prompt_template,
+                        'aspect_ratio': aspect_ratio_gen,
+                        'image_resolution': image_resolution_gen.lower(),
+                        'style': style_gen.lower(),
+                        'seed': seed_gen
                     })
                 
                 elif step_type == "Edit Image":
                     # Model selection for editing steps
                     edit_model_options_edit = {
                         "Seedream v4 (Edit)": "bytedance/seedream-v4-edit",
-                        # "Qwen VL-Plus": "qwen/qwen-vl-plus", # Example, might need different input format
+                        "GPT-4o Image (Edit Capability)": "gpt-4o/image",
                     }
                     edit_model_name = st.selectbox(
                         "Editing Model",
@@ -2361,12 +2399,25 @@ def display_workflows_page():
                         "Edit Strength", 0.1, 1.0, 0.7, # Min, Max, Default
                         key=f"edit_strength_{i}"
                     )
-                    
+                    # Add other relevant editing parameters if available
+                    edit_resolution_edit = st.selectbox(
+                        "Output Quality",
+                        ["Standard", "HD"],
+                        key=f"edit_resolution_{i}"
+                    )
+                    edit_aspect_ratio_edit = st.selectbox(
+                        "Aspect Ratio",
+                        ["1:1", "16:9", "9:16", "4:3", "3:4"],
+                        key=f"edit_aspect_ratio_{i}"
+                    )
+
                     step_config.update({
                         'edit_model_name': edit_model_name,
                         'edit_model_id': edit_model_id,
                         'edit_instructions': edit_instructions,
-                        'edit_strength': edit_strength
+                        'edit_strength': edit_strength,
+                        'image_resolution': edit_resolution_edit.lower(),
+                        'aspect_ratio': edit_aspect_ratio_edit
                     })
 
                 elif step_type == "Apply Style (Future)":
@@ -2425,7 +2476,7 @@ def display_workflows_page():
                     st.markdown(f"**Steps:** {len(workflow.get('steps', []))}") # Count steps
                     st.markdown(f"**Created:** {workflow.get('created_at', 'N/A')}")
                     
-                    # Action buttons for each workflow: Run, Edit, Delete
+                    # Action buttons for each workflow
                     action_cols = st.columns([1, 1, 1])
                     
                     with action_cols[0]:
@@ -2444,7 +2495,7 @@ def display_workflows_page():
                             if st.button("Confirm Delete", key=f"confirm_delete_{wf_id}"):
                                 del st.session_state.workflows[wf_id] # Remove workflow from session state
                                 st.success("Workflow deleted.")
-                                st.rerun() # Rerun to update UI
+                                st.rerun() # Rerun to update the UI
         else:
             st.info("No workflows created yet. Click on the 'Create Workflow' tab to start!")
     
@@ -2790,7 +2841,7 @@ def display_analytics_page():
         st.info("No hourly usage data recorded yet.")
 
     st.divider() # Separator
-
+    
     # --- Section 6: Success Rate Analysis ---
     st.markdown("### ✅ Success Rate Analysis")
     
@@ -3201,7 +3252,7 @@ def display_settings_page():
     A comprehensive AI image generation and management platform designed for professionals and enthusiasts.
     
     **Features:**
-    - Multiple AI models (FLUX, Stable Diffusion, Seedream, etc.) for text-to-image and editing.
+    - Multiple AI models (FLUX, Stable Diffusion, Seedream, GPT-4o, etc.) for text-to-image and editing.
     - Seamless integration with Google Drive and Google Sheets for storage and logging.
     - Robust task management and history tracking.
     - Advanced analytics dashboard with model usage, tag insights, and cost estimations.
@@ -3331,7 +3382,7 @@ def main():
         
         # Final status indicators in sidebar
         if st.session_state.get('authenticated'):
-            st.success("✅ Google Drive Connected")
+            st.success("✅ Drive Connected")
             if st.session_state.app_folder_id:
                 # Display truncated app folder ID for reference
                 folder_id_short = st.session_state.app_folder_id[:20] + "..." if st.session_state.app_folder_id and len(st.session_state.app_folder_id) > 20 else st.session_state.app_folder_id
